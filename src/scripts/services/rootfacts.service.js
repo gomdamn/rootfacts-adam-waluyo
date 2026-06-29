@@ -5,8 +5,7 @@ class RootFactsService {
     this.isGenerating = false;
     this.currentBackend = 'wasm';
     this.currentTone = 'normal';
-    // Xenova/Transformers.js instruction model. Keep it local in browser with q4.
-    this.modelId = 'Xenova/flan-t5-small';
+    this.modelId = 'Xenova/LaMini-Flan-T5-77M';
     this.loadingPromise = null;
   }
 
@@ -63,10 +62,10 @@ class RootFactsService {
   #toneInstruction(tone) {
     const tones = {
       normal: 'Use a clear and friendly tone.',
-      funny: 'Use a playful but still factual tone.',
+      funny: 'Use a playful but factual tone.',
       professional: 'Use a concise educational tone.',
       casual: 'Use a relaxed everyday tone.',
-      sejarah: 'Focus on history or traditional use.',
+      sejarah: 'Mention a short history or traditional use if relevant.',
     };
     return tones[tone] || tones.normal;
   }
@@ -76,19 +75,19 @@ class RootFactsService {
 
     if (attempt === 1) {
       return [
-        `Write one short fun fact about ${vegetable}.`,
-        `The answer must be about ${vegetable} only.`,
-        `Mention a real aspect such as nutrition, benefit, characteristic, history, or common use.`,
+        `Write one useful fun fact about ${vegetable}.`,
+        `The sentence must only discuss ${vegetable}.`,
+        `Mention nutrition, benefits, characteristics, history, or common uses.`,
         style,
-        `Use 1 sentence, maximum 28 words.`,
+        `Use English. Keep it under 30 words.`,
       ].join(' ');
     }
 
     return [
       `Vegetable: ${vegetable}.`,
-      `Task: write exactly one factual fun fact about ${vegetable}, not about any other plant.`,
-      `Make it informative and specific.`,
-      `Output only the final sentence.`,
+      `Task: produce exactly one factual sentence about ${vegetable} only.`,
+      `Do not mention other vegetables.`,
+      `Use English. Make it readable and informative.`,
       `Maximum 25 words.`,
     ].join(' ');
   }
@@ -107,11 +106,9 @@ class RootFactsService {
       .replace(/\s+/g, ' ')
       .trim();
 
-    // Keep only the first sentence to avoid rambling output.
     const firstSentence = cleaned.match(/^.*?[.!?](\s|$)/);
     if (firstSentence) cleaned = firstSentence[0].trim();
 
-    // Make the predicted label explicit for reviewer visibility.
     if (cleaned && !cleaned.toLowerCase().includes(vegetable.toLowerCase())) {
       cleaned = `${vegetable}: ${cleaned}`;
     }
@@ -122,10 +119,9 @@ class RootFactsService {
 
   #isRelevantAndReadable(text, vegetable) {
     const cleaned = String(text || '').trim();
-    if (cleaned.length < 30) return false;
+    if (cleaned.length < 25) return false;
     if (!cleaned.toLowerCase().includes(vegetable.toLowerCase())) return false;
 
-    // Reject degenerate repeated-token outputs such as "saat saat saat".
     const words = cleaned.toLowerCase().replace(/[^a-z\s-]/g, ' ').split(/\s+/).filter(Boolean);
     if (words.length < 6) return false;
 
@@ -146,10 +142,11 @@ class RootFactsService {
 
   async #generateWithPrompt(generator, prompt) {
     const output = await generator(prompt, {
-      max_new_tokens: 70,
-      do_sample: false,
-      num_beams: 2,
-      repetition_penalty: 1.35,
+      max_new_tokens: 65,
+      temperature: 0.8,
+      top_p: 0.9,
+      do_sample: true,
+      repetition_penalty: 1.25,
       no_repeat_ngram_size: 3,
     });
     return this.#extractGeneratedText(output);
@@ -157,9 +154,7 @@ class RootFactsService {
 
   async generateFacts(vegetable, tone = this.currentTone, onProgress = () => {}) {
     const safeVegetable = this.#sanitizeInput(vegetable);
-    if (!safeVegetable) {
-      return 'The detected vegetable label is not clear enough yet.';
-    }
+    if (!safeVegetable) return 'The detected vegetable label is not clear enough yet.';
 
     this.isGenerating = true;
 
@@ -182,12 +177,10 @@ class RootFactsService {
         console.warn('Xenova output rejected and retried:', cleanedText);
       }
 
-      // This message is not a static fun fact. It is only an error state when the local model
-      // produces invalid text after retries, so the reviewer can see the app does not use fallback facts.
-      return `Xenova generated invalid text for ${safeVegetable}. Please keep the camera steady and scan ${safeVegetable} again.`;
+      return `Xenova generated unreadable text for ${safeVegetable}. Press scan again and keep ${safeVegetable} steady in the camera.`;
     } catch (error) {
       console.error('Generative AI Xenova failed:', error);
-      return `Xenova could not generate a fun fact for ${safeVegetable}. Please reload the page with internet access and scan again.`;
+      return `Xenova could not generate a fun fact for ${safeVegetable}. Reload the page with internet access and scan again.`;
     } finally {
       this.isGenerating = false;
     }

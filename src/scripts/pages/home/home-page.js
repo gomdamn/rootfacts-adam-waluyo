@@ -16,11 +16,10 @@ export default class HomePage {
   #currentFPS = 30;
   #lastLabel = '';
   #lastFact = '';
-  #stableLabel = '';
-  #stableSince = 0;
-  #lastGeneratedLabel = '';
-  #lastGeneratedTone = '';
+  #isResultLocked = false;
   #generationId = 0;
+  #minimumConfidence = 0.40;
+  #captureMode = 'idle'; // idle -> preview -> locked
 
   async render() {
     return `
@@ -59,7 +58,7 @@ export default class HomePage {
     this.funFactText = document.getElementById('fun-fact-text');
     this.funFactLoading = document.getElementById('fun-fact-loading');
 
-    this.btnToggle.addEventListener('click', () => this.#toggleCamera());
+    this.btnToggle.addEventListener('click', () => this.#handleScanButton());
     this.fpsSlider.addEventListener('input', (event) => this.#setFPS(event.target.value));
     this.toneSelect.addEventListener('change', () => this.#regenerateFactWithTone());
     this.btnCopy.addEventListener('click', () => this.#copyFact());
@@ -73,8 +72,6 @@ export default class HomePage {
     this.#showLoading('Menunggu Model Computer Vision... 0%');
 
     try {
-      // Jangan menunggu Transformers.js di awal, karena model teks cukup besar.
-      // Kamera dan model TensorFlow.js harus siap lebih dulu agar UI tidak stuck di "Memuat...".
       await this.#detectionService.loadModel((percent, message) => {
         this.#setHeaderStatus(`${message} ${percent}%`, false);
         this.#showLoading(`${message} ${percent}%`);
@@ -84,14 +81,12 @@ export default class HomePage {
       this.#setHeaderStatus('Siap memindai', true);
       this.#showIdle();
 
-      // Muat Generative AI lokal secara background agar UI dan kamera tetap responsif.
-      // Saat label terdeteksi, fun fact tetap menunggu output dari model Xenova/Transformers.js.
       this.#rootFactsService.loadModel((percent, message) => {
         console.info(`${message} ${percent}%`);
       }).then(() => {
         this.#setHeaderStatus('Siap memindai + AI Xenova', true);
       }).catch((error) => {
-        console.warn('Generative AI belum siap. Fun fact akan mencoba memuat ulang saat label terdeteksi.', error);
+        console.warn('Model generatif Xenova akan dimuat ulang saat dibutuhkan.', error);
       });
     } catch (error) {
       console.error(error);
@@ -100,9 +95,19 @@ export default class HomePage {
     }
   }
 
-  async #toggleCamera() {
+  async #handleScanButton() {
+    // Alur revisi reviewer:
+    // 1) klik pertama: webcam menyala sebagai preview saja.
+    // 2) klik kedua: ambil frame/foto, matikan webcam, lalu inference + fun fact.
+    // 3) setelah hasil tampil, klik lagi untuk scan ulang dari awal.
+    if (this.#isResultLocked) {
+      this.#clearResultMemory();
+      await this.#startCamera();
+      return;
+    }
+
     if (this.#cameraService.isActive()) {
-      this.#stopCamera();
+      await this.#capturePhotoAndAnalyze();
       return;
     }
 
@@ -111,14 +116,18 @@ export default class HomePage {
 
   async #startCamera() {
     try {
+      this.#clearResultMemory();
+      this.video.classList.remove('hidden');
+      this.canvas.classList.add('hidden');
+
       await this.#cameraService.startCamera('media-video', 'media-canvas', this.cameraSelect);
       this.placeholder.classList.add('hidden');
       this.overlay.classList.add('active');
+      this.#captureMode = 'preview';
       this.btnToggle.classList.add('scanning');
-      this.btnToggle.innerHTML = '<i data-lucide="square" width="24" height="24"></i>';
-      this.#setHeaderStatus('Kamera aktif', true);
-      this.#showLoading('Menganalisis objek sayuran...');
-      this.#startPredictionLoop();
+      this.btnToggle.innerHTML = '<i data-lucide="camera" width="24" height="24"></i>';
+      this.#setHeaderStatus('Kamera aktif - tekan tombol kamera untuk ambil foto', true);
+      this.#showIdle('Arahkan kamera ke sayuran, lalu tekan tombol kamera untuk mengambil foto dan memulai analisis.');
       this.#refreshIcons();
     } catch (error) {
       console.error(error);
@@ -127,10 +136,15 @@ export default class HomePage {
     }
   }
 
-  #stopCamera() {
+  #stopCameraAndReset() {
     this.#cameraService.stopCamera();
     clearTimeout(this.#predictionTimer);
     this.#predictionTimer = null;
+    this.#isAnalyzing = false;
+    this.#isResultLocked = false;
+    this.#captureMode = 'idle';
+    this.video.classList.remove('hidden');
+    this.canvas.classList.add('hidden');
     this.placeholder.classList.remove('hidden');
     this.overlay.classList.remove('active');
     this.btnToggle.classList.remove('scanning');
@@ -146,13 +160,60 @@ export default class HomePage {
     this.#cameraService.setFPS(this.#currentFPS);
   }
 
+
+  async #capturePhotoAndAnalyze() {
+    if (!this.#cameraService.isActive() || !this.video?.videoWidth) return;
+
+    this.#captureMode = 'locked';
+    this.#isResultLocked = true;
+    clearTimeout(this.#predictionTimer);
+    this.#predictionTimer = null;
+    this.#generationId += 1;
+
+    // Simpan frame terakhir ke canvas agar gambar tetap terlihat setelah webcam dimatikan.
+    this.#captureCurrentFrame();
+    this.#cameraService.stopCamera();
+    this.overlay.classList.remove('active');
+    this.placeholder.classList.add('hidden');
+    this.btnToggle.classList.remove('scanning');
+    this.btnToggle.innerHTML = '<i data-lucide="rotate-cw" width="24" height="24"></i>';
+    this.#setHeaderStatus('Foto diambil - sedang menganalisis', true);
+    this.#showLoading('Menganalisis foto sayuran...');
+    this.#refreshIcons();
+
+    try {
+      const result = await this.#detectionService.predict(this.canvas);
+      const { label, confidence, confidencePercent } = result;
+      this.#lastLabel = label;
+      this.#updateResultHeader(label, confidencePercent);
+      this.#setHeaderStatus('Hasil terdeteksi - tekan untuk scan ulang', true);
+      this.#showResult();
+      this.#refreshIcons();
+
+      if (confidence < this.#minimumConfidence) {
+        this.funFactLoading.classList.add('hidden');
+        this.funFactText.textContent = `${label}: hasil prediksi masih rendah (${confidencePercent}%). Tekan scan ulang dan ambil foto objek sayuran lebih dekat.`;
+        this.#lastFact = this.funFactText.textContent;
+        return;
+      }
+
+      await this.#generateFact(label);
+    } catch (error) {
+      console.error('Analisis foto gagal:', error);
+      this.#setHeaderStatus('Analisis gagal - tekan untuk scan ulang', false);
+      this.#showResult();
+      this.funFactLoading.classList.add('hidden');
+      this.funFactText.textContent = 'Analisis foto gagal. Tekan tombol scan ulang, lalu ambil foto lagi.';
+    }
+  }
+
   #startPredictionLoop() {
     clearTimeout(this.#predictionTimer);
 
     const loop = async () => {
-      if (!this.#cameraService.isActive()) return;
+      if (!this.#cameraService.isActive() || this.#isResultLocked) return;
       await this.#predictFrame();
-      const delay = Math.max(1000 / this.#currentFPS, 100);
+      const delay = Math.max(1000 / this.#currentFPS, 120);
       this.#predictionTimer = setTimeout(loop, delay);
     };
 
@@ -160,12 +221,12 @@ export default class HomePage {
   }
 
   async #predictFrame() {
-    if (this.#isAnalyzing || !this.video?.videoWidth) return;
+    if (this.#isAnalyzing || !this.video?.videoWidth || this.#isResultLocked) return;
     this.#isAnalyzing = true;
 
     try {
       const result = await this.#detectionService.predict(this.video);
-      this.#renderPrediction(result);
+      await this.#handlePrediction(result);
     } catch (error) {
       console.warn('Prediksi gagal:', error);
     } finally {
@@ -173,47 +234,60 @@ export default class HomePage {
     }
   }
 
-  async #renderPrediction(result) {
-    const { label, confidencePercent } = result;
-    const now = Date.now();
-
+  async #handlePrediction(result) {
+    const { label, confidence, confidencePercent } = result;
     this.#lastLabel = label;
-    this.detectedName.textContent = label;
-    this.detectedConfidence.textContent = `${confidencePercent}%`;
-    this.confidenceFill.style.width = `${Math.min(confidencePercent, 100)}%`;
+    this.#updateResultHeader(label, confidencePercent);
+
+    if (confidence < this.#minimumConfidence) {
+      this.#showLoading(`Prediksi ${label} masih kurang yakin (${confidencePercent}%). Dekatkan kamera ke objek.`);
+      return;
+    }
+
+    // Kunci hasil pertama yang confidence-nya cukup tinggi agar deskripsi tidak berubah-ubah.
+    // Setelah hasil dikunci, webcam dimatikan dan frame terakhir dipertahankan di canvas.
+    await this.#lockResultAndGenerateFact(result);
+  }
+
+  async #lockResultAndGenerateFact(result) {
+    if (this.#isResultLocked) return;
+
+    this.#isResultLocked = true;
+    clearTimeout(this.#predictionTimer);
+    this.#predictionTimer = null;
+
+    const { label, confidencePercent } = result;
+    this.#updateResultHeader(label, confidencePercent);
+    this.#captureCurrentFrame();
+    this.#cameraService.stopCamera();
+
+    this.overlay.classList.remove('active');
+    this.placeholder.classList.add('hidden');
+    this.btnToggle.classList.remove('scanning');
+    this.btnToggle.innerHTML = '<i data-lucide="rotate-cw" width="24" height="24"></i>';
+    this.#setHeaderStatus('Hasil terdeteksi - tekan untuk scan ulang', true);
     this.#showResult();
+    this.#refreshIcons();
 
-    // Jangan langsung generate pada label yang masih berubah-ubah.
-    // Reviewer mengecek relevansi fact terhadap label, jadi label harus stabil dulu.
-    if (confidencePercent < 55) {
-      this.funFactText.textContent = `Prediksi ${label} masih kurang yakin. Arahkan kamera lebih dekat agar fun fact relevan.`;
-      this.#stableLabel = '';
-      this.#stableSince = 0;
-      return;
-    }
+    await this.#generateFact(label);
+  }
 
-    if (label !== this.#stableLabel) {
-      this.#stableLabel = label;
-      this.#stableSince = now;
-      this.funFactText.textContent = `Menstabilkan prediksi ${label} sebelum membuat fun fact...`;
-      return;
-    }
+  #captureCurrentFrame() {
+    if (!this.video?.videoWidth || !this.canvas) return;
 
-    const isStable = now - this.#stableSince >= 1200;
-    const tone = this.toneSelect.value;
-    const alreadyGenerated = this.#lastGeneratedLabel === label && this.#lastGeneratedTone === tone;
+    const ctx = this.canvas.getContext('2d');
+    this.canvas.width = this.video.videoWidth;
+    this.canvas.height = this.video.videoHeight;
+    ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
 
-    if (isStable && !alreadyGenerated && !this.#rootFactsService.isGenerating) {
-      await this.#generateFact(label);
-    }
+    this.video.classList.add('hidden');
+    this.canvas.classList.remove('hidden');
   }
 
   async #generateFact(label) {
     const generationId = ++this.#generationId;
     const tone = this.toneSelect.value;
 
-    this.#lastGeneratedLabel = label;
-    this.#lastGeneratedTone = tone;
     this.funFactLoading.classList.remove('hidden');
     this.funFactText.textContent = `Membuat fun fact tentang ${label} menggunakan model Xenova/Transformers.js...`;
 
@@ -223,7 +297,6 @@ export default class HomePage {
       }
     });
 
-    // Abaikan hasil lama jika selama proses generasi label sudah berganti.
     if (generationId !== this.#generationId) return;
 
     this.#lastFact = fact;
@@ -233,9 +306,8 @@ export default class HomePage {
 
   async #regenerateFactWithTone() {
     this.#rootFactsService.setTone(this.toneSelect.value);
-    this.#lastGeneratedLabel = '';
-    this.#lastGeneratedTone = '';
-    if (this.#stableLabel || this.#lastLabel) await this.#generateFact(this.#stableLabel || this.#lastLabel);
+    if (!this.#isResultLocked || !this.#lastLabel) return;
+    await this.#generateFact(this.#lastLabel);
   }
 
   async #copyFact() {
@@ -250,6 +322,25 @@ export default class HomePage {
       this.btnCopy.innerHTML = '<i data-lucide="copy" width="18" height="18"></i>';
       this.#refreshIcons();
     }, 1200);
+  }
+
+  #clearResultMemory() {
+    this.#generationId += 1;
+    this.#isResultLocked = false;
+    this.#lastLabel = '';
+    this.#lastFact = '';
+    this.#captureMode = 'idle';
+    this.funFactLoading?.classList.add('hidden');
+    if (this.funFactText) this.funFactText.textContent = 'Fakta menarik akan muncul di sini...';
+    if (this.detectedName) this.detectedName.textContent = 'Sayuran';
+    if (this.detectedConfidence) this.detectedConfidence.textContent = '0%';
+    if (this.confidenceFill) this.confidenceFill.style.width = '0%';
+  }
+
+  #updateResultHeader(label, confidencePercent) {
+    this.detectedName.textContent = label;
+    this.detectedConfidence.textContent = `${confidencePercent}%`;
+    this.confidenceFill.style.width = `${Math.min(confidencePercent, 100)}%`;
   }
 
   #showIdle(message = null) {

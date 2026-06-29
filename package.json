@@ -1,6 +1,6 @@
 {
-  "name": "rootfacts-adam-waluyo-revisi-funfact",
-  "version": "1.0.2",
+  "name": "rootfacts-adam-waluyo-revisi-reviewer-v4",
+  "version": "1.0.4",
   "description": "RootFacts - AI Vegetable Recognition and Generative Fun Facts",
   "scripts": {
     "build": "webpack --config webpack.prod.js",
