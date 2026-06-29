@@ -1,1 +1,1 @@
-APP_URL=https://ISI_URL_NETLIFY_KAMU_DI_SINI.netlify.app
+APP_URL=https://brilliant-treacle-434cbf.netlify.app/
