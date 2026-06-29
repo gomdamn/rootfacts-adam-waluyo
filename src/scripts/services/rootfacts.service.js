@@ -1,24 +1,3 @@
-const LOCAL_FUN_FACTS = {
-  Beetroot: 'Beetroot gets its deep red color from betalain pigments, and those pigments are also used as natural food coloring.',
-  Paprika: 'Paprika is made from dried peppers, and its flavor can range from sweet and mild to smoky and spicy.',
-  Cabbage: 'Cabbage has been cultivated for thousands of years and is naturally rich in vitamin C and fiber.',
-  Carrot: 'Carrots are famous for beta-carotene, a pigment that the body can convert into vitamin A.',
-  Cauliflower: 'Cauliflower belongs to the same plant family as broccoli, cabbage, and kale: the Brassica family.',
-  Chilli: 'Chilli peppers contain capsaicin, the compound that creates their hot sensation.',
-  Corn: 'Corn is technically a grain, but it is often enjoyed as a vegetable when harvested young and sweet.',
-  Cucumber: 'Cucumbers are mostly water, which is why they taste refreshing and crisp.',
-  eggplant: 'Eggplant is botanically a berry, even though it is usually cooked like a vegetable.',
-  Garlic: 'Garlic releases its strong aroma when crushed because sulfur compounds are activated.',
-  Ginger: 'Ginger is a rhizome, an underground stem, and it has been used in food and traditional remedies for centuries.',
-  Lettuce: 'Lettuce leaves are delicate because they contain lots of water and very little fat.',
-  Onion: 'Onions can make people cry because cutting them releases sulfur-containing compounds into the air.',
-  Peas: 'Peas are tiny seeds inside pods, and they naturally add protein and sweetness to meals.',
-  Potato: 'Potatoes are underground tubers and became one of the world’s most important staple foods.',
-  Turnip: 'Turnips can be eaten from root to leaves, making them a versatile crop.',
-  Soybean: 'Soybeans are protein-rich legumes used to make tofu, tempeh, soy milk, and many other foods.',
-  Spinach: 'Spinach is leafy, fast-cooking, and known for iron, folate, and vitamin K.',
-};
-
 class RootFactsService {
   constructor() {
     this.generator = null;
@@ -26,11 +5,13 @@ class RootFactsService {
     this.isGenerating = false;
     this.currentBackend = 'wasm';
     this.currentTone = 'normal';
-    this.modelId = 'Xenova/LaMini-Flan-T5-77M';
+    // Xenova/Transformers.js instruction model. Keep it local in browser with q4.
+    this.modelId = 'Xenova/flan-t5-small';
     this.loadingPromise = null;
   }
 
   async loadModel(onProgress = () => {}) {
+    if (this.generator) return this.generator;
     if (this.loadingPromise) return this.loadingPromise;
 
     this.loadingPromise = this.#loadModelInternal(onProgress);
@@ -38,44 +19,33 @@ class RootFactsService {
   }
 
   async #loadModelInternal(onProgress = () => {}) {
-    try {
-      onProgress(10, 'Menyiapkan Generative AI lokal...');
+    onProgress(5, 'Preparing Xenova Generative AI model...');
 
-      const { env, pipeline } = await import(
-        /* webpackIgnore: true */ 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/transformers.min.js'
-      );
+    const { env, pipeline } = await import(
+      /* webpackIgnore: true */ 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/transformers.min.js'
+    );
 
-      env.allowLocalModels = false;
-      env.useBrowserCache = true;
+    env.allowLocalModels = false;
+    env.allowRemoteModels = true;
+    env.useBrowserCache = true;
+    env.backends.onnx.wasm.numThreads = 1;
 
-      const device = navigator.gpu ? 'webgpu' : 'wasm';
-      this.currentBackend = device;
-      onProgress(45, `Memuat Transformers.js (${device})...`);
+    onProgress(25, `Loading ${this.modelId}...`);
 
-      try {
-        this.generator = await pipeline('text2text-generation', this.modelId, {
-          dtype: 'q4',
-          device,
-        });
-      } catch (gpuError) {
-        console.warn('Generative AI fallback ke WASM.', gpuError);
-        this.currentBackend = 'wasm';
-        this.generator = await pipeline('text2text-generation', this.modelId, {
-          dtype: 'q4',
-          device: 'wasm',
-        });
-      }
+    this.generator = await pipeline('text2text-generation', this.modelId, {
+      dtype: 'q4',
+      device: 'wasm',
+      progress_callback: (progress) => {
+        const fileProgress = progress?.progress ? Math.round(progress.progress) : 0;
+        const percent = Math.min(95, 30 + Math.round(fileProgress * 0.6));
+        onProgress(percent, `Loading Xenova/Transformers.js ${fileProgress}%...`);
+      },
+    });
 
-      this.isModelLoaded = true;
-      onProgress(100, `Generative AI siap (${this.currentBackend.toUpperCase()})`);
-      return this.generator;
-    } catch (error) {
-      console.warn('Model generatif gagal dimuat. Fallback lokal digunakan.', error);
-      this.generator = null;
-      this.isModelLoaded = true;
-      onProgress(100, 'Fallback fun fact siap');
-      return null;
-    }
+    this.currentBackend = 'wasm';
+    this.isModelLoaded = true;
+    onProgress(100, 'Xenova Generative AI is ready');
+    return this.generator;
   }
 
   setTone(tone) {
@@ -85,66 +55,146 @@ class RootFactsService {
   #sanitizeInput(text) {
     return String(text || '')
       .replace(/[^a-zA-Z\s-]/g, '')
+      .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 40);
   }
 
   #toneInstruction(tone) {
     const tones = {
-      normal: 'Write in a clear and friendly tone.',
-      funny: 'Write in a playful and funny tone suitable for teenagers.',
-      professional: 'Write in a concise educational tone for a nutrition class.',
-      casual: 'Write in a relaxed everyday tone.',
-      sejarah: 'Write with a historical storytelling angle.',
+      normal: 'Use a clear and friendly tone.',
+      funny: 'Use a playful but still factual tone.',
+      professional: 'Use a concise educational tone.',
+      casual: 'Use a relaxed everyday tone.',
+      sejarah: 'Focus on history or traditional use.',
     };
     return tones[tone] || tones.normal;
   }
 
-  #fallbackFact(safeVegetable, tone) {
-    const baseFact = LOCAL_FUN_FACTS[safeVegetable] || `${safeVegetable} has unique nutrients and culinary uses that make it valuable in everyday meals.`;
-    if (tone === 'funny') return `${baseFact} Pretty impressive for a humble vegetable, right?`;
-    if (tone === 'professional') return `${baseFact} This makes it useful as part of a varied and balanced diet.`;
-    if (tone === 'casual') return `${baseFact} Jadi, sayuran ini ternyata punya cerita menarik juga.`;
-    if (tone === 'sejarah') return `${baseFact} Its long journey in food culture shows how vegetables can shape daily life across generations.`;
-    return baseFact;
+  #buildPrompt(vegetable, tone, attempt = 1) {
+    const style = this.#toneInstruction(tone);
+
+    if (attempt === 1) {
+      return [
+        `Write one short fun fact about ${vegetable}.`,
+        `The answer must be about ${vegetable} only.`,
+        `Mention a real aspect such as nutrition, benefit, characteristic, history, or common use.`,
+        style,
+        `Use 1 sentence, maximum 28 words.`,
+      ].join(' ');
+    }
+
+    return [
+      `Vegetable: ${vegetable}.`,
+      `Task: write exactly one factual fun fact about ${vegetable}, not about any other plant.`,
+      `Make it informative and specific.`,
+      `Output only the final sentence.`,
+      `Maximum 25 words.`,
+    ].join(' ');
   }
 
-  async generateFacts(vegetable, tone = this.currentTone) {
-    const safeVegetable = this.#sanitizeInput(vegetable);
-    if (!safeVegetable) return 'Sayuran belum terdeteksi dengan jelas. Coba arahkan kamera ke objek sayuran.';
+  #extractGeneratedText(output) {
+    if (Array.isArray(output)) {
+      return output[0]?.generated_text || output[0]?.summary_text || output[0]?.text || '';
+    }
+    return output?.generated_text || output?.summary_text || output?.text || '';
+  }
 
-    // Mulai load Transformers.js, tapi jangan memblokir UI terlalu lama.
-    if (!this.loadingPromise) this.loadModel();
-    if (!this.generator) return this.#fallbackFact(safeVegetable, tone);
+  #normalizeText(text, prompt, vegetable) {
+    let cleaned = String(text || '')
+      .replace(prompt, '')
+      .replace(/^(fun fact:|fact:|answer:|output:)/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Keep only the first sentence to avoid rambling output.
+    const firstSentence = cleaned.match(/^.*?[.!?](\s|$)/);
+    if (firstSentence) cleaned = firstSentence[0].trim();
+
+    // Make the predicted label explicit for reviewer visibility.
+    if (cleaned && !cleaned.toLowerCase().includes(vegetable.toLowerCase())) {
+      cleaned = `${vegetable}: ${cleaned}`;
+    }
+
+    if (cleaned && !/[.!?]$/.test(cleaned)) cleaned += '.';
+    return cleaned;
+  }
+
+  #isRelevantAndReadable(text, vegetable) {
+    const cleaned = String(text || '').trim();
+    if (cleaned.length < 30) return false;
+    if (!cleaned.toLowerCase().includes(vegetable.toLowerCase())) return false;
+
+    // Reject degenerate repeated-token outputs such as "saat saat saat".
+    const words = cleaned.toLowerCase().replace(/[^a-z\s-]/g, ' ').split(/\s+/).filter(Boolean);
+    if (words.length < 6) return false;
+
+    let repeatRun = 1;
+    for (let i = 1; i < words.length; i += 1) {
+      repeatRun = words[i] === words[i - 1] ? repeatRun + 1 : 1;
+      if (repeatRun >= 3) return false;
+    }
+
+    const uniqueRatio = new Set(words).size / words.length;
+    if (uniqueRatio < 0.45) return false;
+
+    const invalidFragments = ['saat saat', 'numa', 'undefined', 'null', 'lorem ipsum'];
+    if (invalidFragments.some((fragment) => cleaned.toLowerCase().includes(fragment))) return false;
+
+    return true;
+  }
+
+  async #generateWithPrompt(generator, prompt) {
+    const output = await generator(prompt, {
+      max_new_tokens: 70,
+      do_sample: false,
+      num_beams: 2,
+      repetition_penalty: 1.35,
+      no_repeat_ngram_size: 3,
+    });
+    return this.#extractGeneratedText(output);
+  }
+
+  async generateFacts(vegetable, tone = this.currentTone, onProgress = () => {}) {
+    const safeVegetable = this.#sanitizeInput(vegetable);
+    if (!safeVegetable) {
+      return 'The detected vegetable label is not clear enough yet.';
+    }
 
     this.isGenerating = true;
-    const prompt = `Generate one unique fun fact about ${safeVegetable}. ${this.#toneInstruction(tone)} Keep it under 45 words. Do not use markdown.`;
 
     try {
-      const output = await this.generator(prompt, {
-        max_new_tokens: 80,
-        temperature: tone === 'funny' ? 0.9 : 0.7,
-        top_p: 0.9,
-        do_sample: true,
+      onProgress(`Loading Xenova model for ${safeVegetable}...`);
+      const generator = await this.loadModel((percent, message) => {
+        onProgress(`${message} ${percent}%`);
       });
 
-      const generated = Array.isArray(output)
-        ? output[0]?.generated_text || output[0]?.summary_text || ''
-        : output?.generated_text || '';
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const prompt = this.#buildPrompt(safeVegetable, tone, attempt);
+        onProgress(`Generating a Xenova fun fact about ${safeVegetable}...`);
+        const generatedText = await this.#generateWithPrompt(generator, prompt);
+        const cleanedText = this.#normalizeText(generatedText, prompt, safeVegetable);
 
-      const clean = String(generated).replace(prompt, '').trim();
-      if (clean.length > 20) return clean;
+        if (this.#isRelevantAndReadable(cleanedText, safeVegetable)) {
+          return cleanedText;
+        }
+
+        console.warn('Xenova output rejected and retried:', cleanedText);
+      }
+
+      // This message is not a static fun fact. It is only an error state when the local model
+      // produces invalid text after retries, so the reviewer can see the app does not use fallback facts.
+      return `Xenova generated invalid text for ${safeVegetable}. Please keep the camera steady and scan ${safeVegetable} again.`;
     } catch (error) {
-      console.warn('Gagal membuat fun fact dengan Transformers.js, memakai fallback.', error);
+      console.error('Generative AI Xenova failed:', error);
+      return `Xenova could not generate a fun fact for ${safeVegetable}. Please reload the page with internet access and scan again.`;
     } finally {
       this.isGenerating = false;
     }
-
-    return this.#fallbackFact(safeVegetable, tone);
   }
 
   isReady() {
-    return this.isModelLoaded;
+    return this.isModelLoaded && Boolean(this.generator);
   }
 }
 

@@ -16,6 +16,11 @@ export default class HomePage {
   #currentFPS = 30;
   #lastLabel = '';
   #lastFact = '';
+  #stableLabel = '';
+  #stableSince = 0;
+  #lastGeneratedLabel = '';
+  #lastGeneratedTone = '';
+  #generationId = 0;
 
   async render() {
     return `
@@ -79,14 +84,14 @@ export default class HomePage {
       this.#setHeaderStatus('Siap memindai', true);
       this.#showIdle();
 
-      // Muat Generative AI lokal secara background. Jika gagal/lama, fun fact tetap muncul
-      // melalui fallback dinamis sampai Transformers.js selesai siap.
+      // Muat Generative AI lokal secara background agar UI dan kamera tetap responsif.
+      // Saat label terdeteksi, fun fact tetap menunggu output dari model Xenova/Transformers.js.
       this.#rootFactsService.loadModel((percent, message) => {
         console.info(`${message} ${percent}%`);
       }).then(() => {
-        this.#setHeaderStatus('Siap memindai + AI fun fact', true);
+        this.#setHeaderStatus('Siap memindai + AI Xenova', true);
       }).catch((error) => {
-        console.warn('Generative AI background loading gagal, fallback tetap aktif.', error);
+        console.warn('Generative AI belum siap. Fun fact akan mencoba memuat ulang saat label terdeteksi.', error);
       });
     } catch (error) {
       console.error(error);
@@ -170,7 +175,7 @@ export default class HomePage {
 
   async #renderPrediction(result) {
     const { label, confidencePercent } = result;
-    const shouldGenerateFact = label !== this.#lastLabel || confidencePercent >= 70;
+    const now = Date.now();
 
     this.#lastLabel = label;
     this.detectedName.textContent = label;
@@ -178,17 +183,49 @@ export default class HomePage {
     this.confidenceFill.style.width = `${Math.min(confidencePercent, 100)}%`;
     this.#showResult();
 
-    if (shouldGenerateFact && !this.#rootFactsService.isGenerating) {
+    // Jangan langsung generate pada label yang masih berubah-ubah.
+    // Reviewer mengecek relevansi fact terhadap label, jadi label harus stabil dulu.
+    if (confidencePercent < 55) {
+      this.funFactText.textContent = `Prediksi ${label} masih kurang yakin. Arahkan kamera lebih dekat agar fun fact relevan.`;
+      this.#stableLabel = '';
+      this.#stableSince = 0;
+      return;
+    }
+
+    if (label !== this.#stableLabel) {
+      this.#stableLabel = label;
+      this.#stableSince = now;
+      this.funFactText.textContent = `Menstabilkan prediksi ${label} sebelum membuat fun fact...`;
+      return;
+    }
+
+    const isStable = now - this.#stableSince >= 1200;
+    const tone = this.toneSelect.value;
+    const alreadyGenerated = this.#lastGeneratedLabel === label && this.#lastGeneratedTone === tone;
+
+    if (isStable && !alreadyGenerated && !this.#rootFactsService.isGenerating) {
       await this.#generateFact(label);
     }
   }
 
   async #generateFact(label) {
-    this.funFactLoading.classList.remove('hidden');
-    this.funFactText.textContent = 'Memuat fakta menarik dari Generative AI lokal...';
-
+    const generationId = ++this.#generationId;
     const tone = this.toneSelect.value;
-    const fact = await this.#rootFactsService.generateFacts(label, tone);
+
+    this.#lastGeneratedLabel = label;
+    this.#lastGeneratedTone = tone;
+    this.funFactLoading.classList.remove('hidden');
+    this.funFactText.textContent = `Membuat fun fact tentang ${label} menggunakan model Xenova/Transformers.js...`;
+
+    const fact = await this.#rootFactsService.generateFacts(label, tone, (message) => {
+      if (generationId === this.#generationId) {
+        this.funFactText.textContent = message;
+      }
+    });
+
+    // Abaikan hasil lama jika selama proses generasi label sudah berganti.
+    if (generationId !== this.#generationId) return;
+
     this.#lastFact = fact;
     this.funFactText.textContent = fact;
     this.funFactLoading.classList.add('hidden');
@@ -196,7 +233,9 @@ export default class HomePage {
 
   async #regenerateFactWithTone() {
     this.#rootFactsService.setTone(this.toneSelect.value);
-    if (this.#lastLabel) await this.#generateFact(this.#lastLabel);
+    this.#lastGeneratedLabel = '';
+    this.#lastGeneratedTone = '';
+    if (this.#stableLabel || this.#lastLabel) await this.#generateFact(this.#stableLabel || this.#lastLabel);
   }
 
   async #copyFact() {

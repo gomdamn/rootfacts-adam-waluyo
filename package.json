@@ -1,6 +1,6 @@
 {
-  "name": "rootfacts-mvp-advanced-stable",
-  "version": "1.0.1",
+  "name": "rootfacts-adam-waluyo-revisi-funfact",
+  "version": "1.0.2",
   "description": "RootFacts - AI Vegetable Recognition and Generative Fun Facts",
   "scripts": {
     "build": "webpack --config webpack.prod.js",
@@ -10,7 +10,13 @@
     "prettier": "prettier . --check",
     "prettier:write": "prettier . --write"
   },
-  "keywords": ["tensorflowjs", "transformersjs", "pwa", "mvp", "dicoding"],
+  "keywords": [
+    "tensorflowjs",
+    "transformersjs",
+    "pwa",
+    "mvp",
+    "dicoding"
+  ],
   "author": "Adam Waluyo",
   "license": "ISC",
   "devDependencies": {
